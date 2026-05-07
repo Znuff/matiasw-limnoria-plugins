@@ -296,14 +296,19 @@ class SpiffyTitles(callbacks.Plugin):
         else:
             log.debug("SpiffyTitles: looking up handler for domain %s" % (domain,))
         if domain in self.handlers:
+                log.debug("SpiffyTitles: found handler for domain %s" % (domain,))
                 handler = self.handlers[domain]
                 title = handler(url, info, channel, network)
         else:
+                log.debug("SpiffyTitles: no direct handler for domain %s, trying base domain" % (domain,))
                 base_domain = self.get_base_domain("http://" + domain)
+                log.debug("SpiffyTitles: base domain is %s" % (base_domain,))
                 if base_domain in self.handlers:
+                    log.debug("SpiffyTitles: found handler for base domain %s" % (base_domain,))
                     handler = self.handlers[base_domain]
                     title = handler(url, info, channel, network)
                 else:
+                    log.debug("SpiffyTitles: no handler found for base domain %s" % (base_domain,))
                     if self.registryValue("default.enabled", channel=channel, network=network):
                         title = self.handler_default(url, channel, network)
         if title and not cached_link:
@@ -644,6 +649,21 @@ class SpiffyTitles(callbacks.Plugin):
                 return "%3.1f%s%s" % (num, unit, suffix)
             num /= 1024.0
         return "%.1f%s%s" % (num, "Yi", suffix)
+
+    def get_image_file_size(self, image_url):
+        """
+        Get the file size of an image by making a HEAD request
+        """
+        try:
+            log.debug("SpiffyTitles: getting file size for %s" % image_url)
+            response = requests.head(image_url, timeout=self.timeout, proxies=self.proxies)
+            response.raise_for_status()
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                return int(content_length)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            log.debug("SpiffyTitles: failed to get file size for %s: %s" % (image_url, e))
+        return None
 
     def get_template(self, handler_template, channel, network):
         """
@@ -1939,142 +1959,180 @@ class SpiffyTitles(callbacks.Plugin):
         Queries imgur API for additional information about imgur links.
         This handler is for any imgur.com domain.
         """
+        log.debug("SpiffyTitles: handler_imgur called with URL: %s, path: %s" % (url, info.path))
         is_album = info.path.startswith("/a/") or info.path.startswith("/gallery/")
+        log.debug("SpiffyTitles: is_album = %s" % is_album)
         result = None
         if is_album:
             result = self.handler_imgur_album(url, info, channel, network)
         else:
             result = self.handler_imgur_image(url, info, channel, network)
+        log.debug("SpiffyTitles: handler_imgur returning: %s" % result)
         return result
 
     def handler_imgur_album(self, url, info, channel, network):
         """
-        Handles retrieving information about albums from the imgur API.
-        imgur provides the following information about albums:
-        https://api.imgur.com/models/album
+        Handles retrieving information about albums from scraping the imgur page.
         """
+        log.debug("SpiffyTitles: handler_imgur_album called with URL: %s" % url)
         if not self.registryValue("imgur.enabled", channel=channel, network=network):
+            log.debug("SpiffyTitles: imgur not enabled")
             return self.handler_default(url, channel, network)
-        client_id = self.registryValue("imgur.clientID")
-        if not client_id:
-            log.error("SpiffyTitles: imgur client ID not set")
-            return self.handler_default(url, channel, network)
-        if info.path.startswith("/a/"):
-            album_id = info.path.split("/a/")[1]
-        elif info.path.startswith("/gallery/"):
-            album_id = info.path.split("/gallery/")[1]
-        """ If there is a query string appended, remove it """
-        if "?" in album_id:
-            album_id = album_id.split("?")[0]
-        if not self.is_valid_imgur_id(album_id):
-            log.error("SpiffyTitles: Invalid imgur ID")
-            return self.handler_default(url, channel, network)
-        log.debug("SpiffyTitles: found imgur album id %s" % (album_id))
-        headers = {"Authorization": "Client-ID {0}".format(client_id)}
-        api_url = "https://api.imgur.com/3/album/{0}".format(album_id)
+        
         try:
-            request = requests.get(
-                api_url, headers=headers, timeout=self.timeout, proxies=self.proxies
-            )
+            log.debug("SpiffyTitles: fetching URL: %s" % url)
+            request = requests.get(url, timeout=self.timeout, proxies=self.proxies, headers={
+                'User-Agent': self.get_user_agent()
+            })
             request.raise_for_status()
+            log.debug("SpiffyTitles: request successful, content length: %d" % len(request.content))
         except (
             requests.exceptions.RequestException,
             requests.exceptions.HTTPError,
         ) as e:
             log.error("SpiffyTitles: Imgur Error: {0}".format(e))
             return self.handler_default(url, channel, network)
-        album = None
-        album = json.loads(request.content.decode())
-        album = album.get("data")
-        if album:
-            album_template = self.registryValue("imgur.albumTemplate", channel=channel, network=network)
-            imgur_album_template = Template(album_template)
-            compiled_template = imgur_album_template.render(
-                {
-                    "title": album.get("title"),
-                    "section": album.get("section"),
-                    "view_count": "{:,}".format(album["views"]),
-                    "image_count": "{:,}".format(album["images_count"]),
-                    "nsfw": album.get("nsfw"),
-                    "description": album.get("description"),
-                }
-            )
-            return compiled_template
-        else:
-            log.error("SpiffyTitles: imgur album API returned unexpected results!")
-            return self.handler_default(url, channel, network)
+        
+        soup = BeautifulSoup(request.content, 'html.parser')
+        script_tag = soup.find('script', string=lambda text: text and 'window.postDataJSON' in text)
+        log.debug("SpiffyTitles: script_tag found: %s" % (script_tag is not None))
+        if script_tag:
+            script_content = script_tag.string
+            # Find the start of the JSON string
+            start = script_content.find('window.postDataJSON="') + len('window.postDataJSON="')
+            # Find the end - the last \" before the closing ;
+            end = script_content.rfind('";')
+            json_str = script_content[start:end]
+            log.debug("SpiffyTitles: extracted JSON length: %d" % len(json_str))
+            # The JSON is double-escaped in HTML, decode it
+            import codecs
+            json_str = codecs.decode(json_str, 'unicode_escape')
+            log.debug("SpiffyTitles: decoded JSON length: %d" % len(json_str))
+            try:
+                album_data = json.loads(json_str)
+                log.debug("SpiffyTitles: parsed JSON successfully, title: %s" % album_data.get("title"))
+                    
+                album_template = self.registryValue("imgur.albumTemplate", channel=channel, network=network)
+                imgur_album_template = Template(album_template)
+                compiled_template = imgur_album_template.render(
+                    {
+                        "title": album_data.get("title"),
+                        "section": album_data.get("tags", [{}])[0].get("display") if album_data.get("tags") else None,
+                        "view_count": "{:,}".format(album_data.get("view_count", 0)),
+                        "image_count": "{:,}".format(album_data.get("image_count", 0)),
+                        "nsfw": album_data.get("is_mature", False),
+                        "description": album_data.get("description"),
+                    }
+                )
+                log.debug("SpiffyTitles: rendered template: %s" % compiled_template)
+                return compiled_template
+            except (json.JSONDecodeError, KeyError) as e:
+                log.error("SpiffyTitles: Error parsing imgur JSON: {0}".format(e))
+                return self.handler_default(url, channel, network)
+        
+        # Fallback to default if no JSON found
+        return self.handler_default(url, channel, network)
 
     def handler_imgur_image(self, url, info, channel, network):
         """
-        Handles retrieving information about images from the imgur API.
-        Used for both direct images and imgur.com/some_image_id_here type links, as
-        they're both single images.
+        Handles retrieving information about images from scraping the imgur page.
+        For direct images (i.imgur.com), converts to imgur.com page and scrapes.
+        For imgur.com/image_id, scrapes metadata.
         """
+        log.debug("SpiffyTitles: handler_imgur_image called with URL: %s, netloc: %s" % (url, info.netloc))
         if not self.registryValue("imgur.enabled", channel=channel, network=network):
+            log.debug("SpiffyTitles: imgur not enabled")
             return self.handler_default(url, channel, network)
-        client_id = self.registryValue("imgur.clientID")
-        if not client_id:
-            log.error("SpiffyTitles: imgur client ID not set")
-            return self.handler_default(url, channel, network)
+
+        image_id = info.path.lstrip("/").split("/")[0].split(".")[0]
+        if info.netloc == "i.imgur.com":
+            url = f"https://imgur.com/{image_id}"
+            log.debug("SpiffyTitles: converted i.imgur.com URL to: %s" % url)
+
+        view_count = None
         title = None
-        """
-        If there is a period in the path, it's a direct link to an image.
-        If not, then it's an imgur.com/some_image_id_here type link
-        """
-        if "." in info.path:
-            path = info.path.lstrip("/")
-            image_id = path.split(".")[0]
-        else:
-            image_id = info.path.lstrip("/")
-        if not self.is_valid_imgur_id(image_id):
-            log.error("SpiffyTitles: Invalid imgur image ID")
-            return self.handler_default(url, channel, network)
-        log.debug("SpiffyTitles: found image id %s" % (image_id))
-        headers = {"Authorization": "Client-ID {0}".format(client_id)}
-        api_url = "https://api.imgur.com/3/image/{0}".format(image_id)
+        width = height = None
+        readable_file_size = None
+
         try:
+            log.debug("SpiffyTitles: fetching URL: %s" % url)
             request = requests.get(
-                api_url, headers=headers, timeout=self.timeout, proxies=self.proxies
+                url,
+                timeout=self.timeout,
+                proxies=self.proxies,
+                headers={
+                    'User-Agent': self.get_user_agent()
+                },
             )
             request.raise_for_status()
+            log.debug("SpiffyTitles: request successful, content length: %d" % len(request.content))
         except (
             requests.exceptions.RequestException,
             requests.exceptions.HTTPError,
         ) as e:
             log.error("SpiffyTitles: Imgur Error: {0}".format(e))
             return self.handler_default(url, channel, network)
-        image = None
+
+        soup = BeautifulSoup(request.content, 'html.parser')
+        og_title = soup.find('meta', property='og:title')
+        if og_title and og_title.get('content') and og_title['content'] != 'imgur.com':
+            title = og_title['content']
+
+        og_image_width = soup.find('meta', property='og:image:width')
+        og_image_height = soup.find('meta', property='og:image:height')
+        if og_image_width:
+            width = og_image_width.get('content')
+        if og_image_height:
+            height = og_image_height.get('content')
+
+        og_image = soup.find('meta', property='og:image')
+        if og_image and og_image.get('content'):
+            image_url = og_image['content']
+        else:
+            image_url = f"https://i.imgur.com/{image_id}.jpeg"
+
+        file_size = self.get_image_file_size(image_url)
+        readable_file_size = self.get_readable_file_size(file_size) if file_size else None
+
+        embed_url = f"https://imgur.com/{image_id}/embed"
         try:
-            image = json.loads(request.content.decode())
-            image = image.get("data")
-        except:
-            log.error("SpiffyTitles: Error reading imgur JSON response")
-            image = None
-        if image:
-            channel_template = self.registryValue(
-                "imgur.imageTemplate", channel=channel, network=network
+            log.debug("SpiffyTitles: fetching embed URL for views: %s" % embed_url)
+            embed_request = requests.get(
+                embed_url,
+                timeout=self.timeout,
+                proxies=self.proxies,
+                headers={
+                    'User-Agent': self.get_user_agent()
+                },
             )
-            imgur_template = Template(channel_template)
-            readable_file_size = self.get_readable_file_size(image["size"])
-            compiled_template = imgur_template.render(
-                {
-                    "title": image.get("title"),
-                    "type": image.get("type"),
-                    "nsfw": image.get("nsfw"),
-                    "width": image.get("width"),
-                    "height": image.get("height"),
-                    "view_count": "{:,}".format(image["views"]),
-                    "file_size": readable_file_size,
-                    "section": image.get("section"),
-                }
-            )
-            title = compiled_template
-        else:
-            log.error("SpiffyTitles: imgur API returned unexpected results!")
-        if title:
-            return title
-        else:
-            return self.handler_default(url, channel, network)
+            embed_request.raise_for_status()
+            embed_soup = BeautifulSoup(embed_request.content, 'html.parser')
+            views_tag = embed_soup.find('a', id='views')
+            if views_tag:
+                label = views_tag.find('span', class_='label')
+                if label and label.string:
+                    view_count = label.string.strip().replace(',', '')
+                    log.debug('SpiffyTitles: extracted view count from embed: %s' % view_count)
+        except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
+            log.debug("SpiffyTitles: embed view count fetch failed: %s" % e)
+
+        channel_template = self.registryValue("imgur.imageTemplate", channel=channel, network=network)
+        imgur_template = Template(channel_template)
+        compiled_template = imgur_template.render(
+            {
+                "title": title,
+                "width": width,
+                "height": height,
+                "file_size": readable_file_size or "",
+                "view_count": "{:,}".format(int(view_count)) if view_count and view_count.isdigit() else None,
+                "nsfw": False,
+                "type": "image/jpeg",
+                "section": None,
+                "age": None,
+            }
+        )
+        log.debug("SpiffyTitles: rendered image template from HTML: %s" % compiled_template)
+        return compiled_template
 
     def handler_twitter(self, url, info, channel, network):
         if not self.registryValue("twitter.enabled", channel, network):
