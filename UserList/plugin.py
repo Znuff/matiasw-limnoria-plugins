@@ -146,7 +146,16 @@ class UserListServerCallback(httpserver.SupyHTTPServerCallback):
                 log.info("channel: " + str(channelname))
                 if channelname in self.plugin.registryValue("channels"):
                     excluded_users = self.plugin.registryValue("ignorednicks")
-                    userlist[channelname] = [user for user in channel_state.users if user not in excluded_users]
+                    userlist[channelname] = [
+                        (
+                            '@' if channel_state.isOp(user) else
+                            '%' if channel_state.isHalfop(user) else
+                            '+' if channel_state.isVoice(user) else
+                            ''
+                        ) + user
+                        for user in channel_state.users
+                        if user not in excluded_users
+                    ]
                 else:
                     log.debug(channelname + " not in channel list, which is " +
 str(self.plugin.registryValue("channels")))
