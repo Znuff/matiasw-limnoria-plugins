@@ -881,9 +881,10 @@ class SpiffyTitles(callbacks.Plugin):
         """
         try:
             parsed_url = urlparse(url)
+
             if 'youtube.com' in parsed_url.netloc:
                 path_parts = parsed_url.path.split('/')
-                # URL of the form https://www.youtube.com/user/username: 
+                # URL of the form https://www.youtube.com/user/username:
                 if 'user' in path_parts:
                     username = path_parts[path_parts.index('user') + 1]
                     api_url = 'https://www.googleapis.com/youtube/v3/channels'
@@ -896,7 +897,7 @@ class SpiffyTitles(callbacks.Plugin):
                                 'forUsername': username,
                                 'key': api_key
                             }
-                         )
+                        )
                         request.raise_for_status()
                         data = json.loads(request.content.decode())
                         if data['items']:
@@ -912,11 +913,9 @@ class SpiffyTitles(callbacks.Plugin):
                 # handle https://www.youtube.com/@GoogleDevelopers style URLs:
                 elif "@" in parsed_url.path:
                     handle = parsed_url.path.split("@")[1]
-
                     # Step 1: search for the channel by handle or name
                     search_url = "https://www.googleapis.com/youtube/v3/search"
                     log.debug("SpiffyTitles: searching for channel handle %s" % handle)
-
                     try:
                         search_request = requests.get(
                             search_url,
@@ -931,16 +930,36 @@ class SpiffyTitles(callbacks.Plugin):
                         )
                         search_request.raise_for_status()
                         search_data = search_request.json()
-
                         if search_data.get("items"):
                             channel_id = search_data["items"][0]["id"]["channelId"]
-
                             # Step 2: return the channel ID directly
                             return channel_id
-
                     except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
                         log.error("SpiffyTitles: YouTube Error: {0}".format(e))
-
+                # handle https://www.youtube.com/<channelname> style URLs (no @, user, or channel)
+                elif len(path_parts) == 2 and path_parts[1] and not path_parts[1].startswith(("@", "user", "channel")):
+                    channel_name = path_parts[1]
+                    search_url = "https://www.googleapis.com/youtube/v3/search"
+                    log.debug(f"SpiffyTitles: searching for channel name {channel_name}")
+                    try:
+                        search_request = requests.get(
+                            search_url,
+                            timeout=self.timeout,
+                            proxies=self.proxies,
+                            params={
+                                "part": "snippet",
+                                "type": "channel",
+                                "q": channel_name,
+                                "key": api_key,
+                            },
+                        )
+                        search_request.raise_for_status()
+                        search_data = search_request.json()
+                        if search_data.get("items"):
+                            channel_id = search_data["items"][0]["id"]["channelId"]
+                            return channel_id
+                    except (requests.exceptions.RequestException, requests.exceptions.HTTPError) as e:
+                        log.error(f"SpiffyTitles: YouTube Error: {e}")
                 return None
 
         except Exception as e:
@@ -964,6 +983,28 @@ class SpiffyTitles(callbacks.Plugin):
                 "for instructions."
             )
             return None
+
+        # Normalize /@<handle>/shorts URLs to /@<handle> for channel handler
+
+        # Accept both /shorts and /shorts/ endings
+        if (
+            info.netloc.endswith("youtube.com")
+            and info.path.startswith("/@")
+            and (info.path.endswith("/shorts") or info.path.endswith("/shorts/"))
+        ):
+            # Remove /shorts or /shorts/ from the end
+            if info.path.endswith("/shorts/"):
+                new_path = info.path[: -len("/shorts/")]
+            else:
+                new_path = info.path[: -len("/shorts")]
+            if not new_path.endswith("/"):
+                new_path += "/"
+            new_url = url.replace(info.path, new_path.rstrip("/"))
+            log.debug(f"SpiffyTitles: normalized YouTube shorts channel URL to: {new_url}")
+            from urllib.parse import urlparse
+            info = urlparse(new_url)
+            url = new_url
+
         log.debug("SpiffyTitles: calling Youtube handler for %s" % (url))
 
         # determine ids from URL
