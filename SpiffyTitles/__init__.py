@@ -50,9 +50,9 @@ __maintainer__ = getattr(
 # This is a dictionary mapping supybot.Author instances to lists of
 # contributions.
 __contributors__ = {
-    supybot.Author("butterscotchstallion"),
-    supybot.Author("oddluck"),
-    supybot.Author("appas"),
+    supybot.Author("butterscotchstallion"): [],
+    supybot.Author("oddluck"): [],
+    supybot.Author("appas"): [],
 }
 
 # This is a url where the most recent plugin package can be downloaded.
