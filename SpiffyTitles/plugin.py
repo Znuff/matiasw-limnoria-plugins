@@ -65,6 +65,77 @@ except ImportError:
     _ = lambda x: x
 
 
+def _slug_title_coverage(url, title):
+    """
+    Compute the redundancy coverage ratio between a URL slug and a title.
+
+    Returns a float in [0.0, 1.0] representing the fraction of meaningful
+    slug tokens (length > 2) that appear in the normalised title token set.
+    Returns None when the slug yields no meaningful tokens (e.g. bare
+    domain, numeric-only path) so callers can distinguish "no signal" from
+    "zero match".
+
+    Normalisation pipeline (applied identically to slug and title):
+    - NFKD Unicode decomposition, drop combining characters (strips all
+      Latin-based diacritics: Romanian, French, Spanish, etc.)
+    - Lowercase
+    - Replace hyphens, en/em-dashes, and slashes with spaces
+    - Strip every character that is not an ASCII letter, digit, or space
+    - Split into a token set
+    """
+    # --- 1. Extract slug ------------------------------------------------
+    path = urlparse(url).path
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+    slug = segments[-1]
+    # Strip common file extensions
+    slug = re.sub(r'\.[a-zA-Z0-9]{1,5}$', '', slug)
+    # Strip trailing numeric ID (dash followed by 4+ digits at the end)
+    slug = re.sub(r'-\d{4,}$', '', slug)
+
+    # --- 2. Normalise pipeline ------------------------------------------
+    def _normalise(text):
+        nfkd = unicodedata.normalize("NFKD", text)
+        ascii_only = "".join(
+            c for c in nfkd if unicodedata.category(c) != "Mn"
+        )
+        lowered = ascii_only.lower()
+        # Replace hyphens, en-dash (U+2013), em-dash (U+2014), and
+        # forward/back slashes with spaces
+        spaced = re.sub(r'[-\u2013\u2014/\\]', ' ', lowered)
+        # Keep only ASCII letters, digits, and spaces
+        cleaned = re.sub(r'[^a-z0-9 ]', '', spaced)
+        return set(cleaned.split())
+
+    slug_tokens = _normalise(slug)
+    title_tokens = _normalise(title)
+
+    # --- 3. Meaningful slug tokens (length > 2) -------------------------
+    meaningful = {t for t in slug_tokens if len(t) > 2}
+    if not meaningful:
+        return None
+
+    # --- 4. Coverage ----------------------------------------------------
+    return len(meaningful & title_tokens) / len(meaningful)
+
+
+def is_title_redundant(url, title, threshold=0.6):
+    """
+    Return True when the article title is redundant given the URL slug.
+
+    Delegates coverage computation to _slug_title_coverage() and compares
+    against threshold.  Returns False when threshold is 0 or when the slug
+    yields no meaningful tokens.
+    """
+    if not threshold:
+        return False
+    coverage = _slug_title_coverage(url, title)
+    if coverage is None:
+        return False
+    return coverage >= threshold
+
+
 class SpiffyTitles(callbacks.Plugin):
     """Displays link titles when posted in a channel"""
 
@@ -243,7 +314,31 @@ class SpiffyTitles(callbacks.Plugin):
                     ignore_match = self.title_matches_ignore_pattern(title, channel, irc.network)
                     if ignore_match:
                         return
-                    elif not is_ignored:
+                    redundant_threshold = self.registryValue(
+                        "redundantTitleThreshold",
+                        channel=channel,
+                        network=irc.network,
+                    )
+                    if redundant_threshold > 0.0:
+                        coverage = _slug_title_coverage(url, title)
+                        redundant = (
+                            coverage is not None
+                            and coverage >= redundant_threshold
+                        )
+                        log.info(
+                            "SpiffyTitles: redundancy check for %s"
+                            " — coverage=%.2f %s threshold=%.2f — %s"
+                            % (
+                                url,
+                                coverage if coverage is not None else 0.0,
+                                ">=" if redundant else "<",
+                                redundant_threshold,
+                                "suppressed" if redundant else "passed",
+                            )
+                        )
+                        if redundant:
+                            return
+                    if not is_ignored:
                         irc.reply(title, prefixNick=prefixed)
                 else:
                     if self.registryValue("default.enabled", channel, network=irc.network):

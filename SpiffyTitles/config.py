@@ -713,3 +713,16 @@ conf.registerChannelValue(
         _("""Uses Twitter API to get additional information about twitter.com links"""),
     ),
 )
+
+# Redundant title suppression
+conf.registerChannelValue(
+    SpiffyTitles,
+    "redundantTitleThreshold",
+    registry.Float(
+        0.0,
+        _("""Suppress title output when this fraction (0.0-1.0) of the
+        meaningful tokens in the URL slug are found in the title. 0.0
+        disables the check. Can be set globally or overridden per-channel
+        with 'config channel #foo SpiffyTitles.redundantTitleThreshold'."""),
+    ),
+)
