@@ -41,6 +41,18 @@ except:
     _ = lambda x: x
 
 
+class _UnitFloat(registry.Float):
+    """Value must be a floating-point number between 0.0 and 1.0."""
+    errormsg = _(
+        "Value must be a floating-point number between 0.0 and 1.0, not %r."
+    )
+
+    def setValue(self, v):
+        if not (0.0 <= float(v) <= 1.0):
+            self.error(v)
+        super(_UnitFloat, self).setValue(v)
+
+
 def configure(advanced):
     # This will be called by supybot to configure this module.  advanced is
     # a bool that specifies whether the user identified themself as an advanced
@@ -718,7 +730,7 @@ conf.registerChannelValue(
 conf.registerChannelValue(
     SpiffyTitles,
     "redundantTitleThreshold",
-    registry.Float(
+    _UnitFloat(
         0.0,
         _("""Suppress title output when this fraction (0.0-1.0) of the
         meaningful tokens in the URL slug are found in the title. 0.0

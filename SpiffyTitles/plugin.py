@@ -321,23 +321,30 @@ class SpiffyTitles(callbacks.Plugin):
                     )
                     if redundant_threshold > 0.0:
                         coverage = _slug_title_coverage(url, title)
-                        redundant = (
-                            coverage is not None
-                            and coverage >= redundant_threshold
-                        )
-                        log.info(
-                            "SpiffyTitles: redundancy check for %s"
-                            " — coverage=%.2f %s threshold=%.2f — %s"
-                            % (
-                                url,
-                                coverage if coverage is not None else 0.0,
-                                ">=" if redundant else "<",
-                                redundant_threshold,
-                                "suppressed" if redundant else "passed",
+                        if coverage is None:
+                            log.info(
+                                "SpiffyTitles: redundancy check for %s"
+                                " — coverage=n/a threshold=%.2f"
+                                " — passed (no slug signal)"
+                                % (url, redundant_threshold)
                             )
-                        )
-                        if redundant:
-                            return
+                        else:
+                            redundant = is_title_redundant(
+                                url, title, redundant_threshold
+                            )
+                            log.info(
+                                "SpiffyTitles: redundancy check for %s"
+                                " — coverage=%.2f %s threshold=%.2f — %s"
+                                % (
+                                    url,
+                                    coverage,
+                                    ">=" if redundant else "<",
+                                    redundant_threshold,
+                                    "suppressed" if redundant else "passed",
+                                )
+                            )
+                            if redundant:
+                                return
                     if not is_ignored:
                         irc.reply(title, prefixNick=prefixed)
                 else:
